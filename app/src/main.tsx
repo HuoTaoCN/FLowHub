@@ -1,0 +1,659 @@
+import React, { useEffect, useMemo, useState } from "react";
+import { createRoot } from "react-dom/client";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import {
+  Activity,
+  CheckCircle2,
+  Download,
+  FileUp,
+  FolderDown,
+  HardDrive,
+  LayoutDashboard,
+  Pause,
+  Play,
+  Plus,
+  Radio,
+  Send,
+  Settings,
+  Trash2,
+  UploadCloud,
+} from "lucide-react";
+import "./styles.css";
+
+type View = "dashboard" | "send" | "download" | "settings";
+
+type Peer = {
+  device_id: string;
+  hostname: string;
+  ip: string;
+  version: string;
+};
+
+type DownloadTask = {
+  id: string;
+  status: string;
+  target: string;
+  progress: number;
+  total_bytes: number;
+  completed_bytes: number;
+  download_speed: number;
+  eta_seconds: number | null;
+};
+
+type TransferTask = {
+  id: string;
+  peer_ip: string;
+  file_path: string;
+  status: string;
+  bytes_transferred: number;
+  total_bytes: number;
+  bytes_per_second: number;
+  eta_seconds: number | null;
+  error: string | null;
+};
+
+const navItems = [
+  { id: "dashboard" as const, label: "Dashboard", icon: LayoutDashboard },
+  { id: "send" as const, label: "Send", icon: Send },
+  { id: "download" as const, label: "Download", icon: Download },
+  { id: "settings" as const, label: "Settings", icon: Settings },
+];
+
+function App() {
+  const [activeView, setActiveView] = useState<View>("dashboard");
+  const [peers, setPeers] = useState<Peer[]>([]);
+  const [downloads, setDownloads] = useState<DownloadTask[]>([]);
+  const [downloadUrl, setDownloadUrl] = useState("");
+  const [dragActive, setDragActive] = useState(false);
+  const [selectedPeerId, setSelectedPeerId] = useState<string | null>(null);
+  const [sendFilePath, setSendFilePath] = useState("");
+  const [transfers, setTransfers] = useState<TransferTask[]>([]);
+  const [status, setStatus] = useState("Ready");
+
+  useEffect(() => {
+    void refreshData();
+    const timer = window.setInterval(refreshData, 2500);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    const unlistenProgress = listen<TransferTask>("transfer-progress", (event) => {
+      setTransfers((current) => upsertTransfer(current, event.payload));
+    });
+    const unlistenReceived = listen<TransferTask>("transfer-received", (event) => {
+      setTransfers((current) => upsertTransfer(current, event.payload));
+      if (event.payload.status === "received") {
+        setStatus(`Received file into ${event.payload.file_path}`);
+      }
+    });
+
+    return () => {
+      void unlistenProgress.then((unlisten) => unlisten());
+      void unlistenReceived.then((unlisten) => unlisten());
+    };
+  }, []);
+
+  async function refreshData() {
+    try {
+      const [peerResult, taskResult] = await Promise.all([
+        invoke<Peer[]>("list_peers"),
+        invoke<DownloadTask[]>("download_tasks"),
+      ]);
+      setPeers(peerResult);
+      setDownloads(taskResult);
+    } catch {
+      setStatus("Backend commands are waiting for the Tauri runtime");
+    }
+  }
+
+  async function addDownload() {
+    if (!downloadUrl.trim()) {
+      return;
+    }
+
+    setStatus("Adding download...");
+    try {
+      await invoke<string>("add_download", { url: downloadUrl.trim() });
+      setDownloadUrl("");
+      await refreshData();
+      setStatus("Download added");
+    } catch (error) {
+      setStatus(String(error));
+    }
+  }
+
+  async function pauseDownload(gid: string) {
+    setStatus("Pausing download...");
+    try {
+      await invoke("pause_download", { gid });
+      await refreshData();
+      setStatus("Download paused");
+    } catch (error) {
+      setStatus(String(error));
+    }
+  }
+
+  async function resumeDownload(gid: string) {
+    setStatus("Resuming download...");
+    try {
+      await invoke("resume_download", { gid });
+      await refreshData();
+      setStatus("Download resumed");
+    } catch (error) {
+      setStatus(String(error));
+    }
+  }
+
+  async function removeDownload(gid: string) {
+    setStatus("Removing download...");
+    try {
+      await invoke("remove_download", { gid });
+      await refreshData();
+      setStatus("Download removed");
+    } catch (error) {
+      setStatus(String(error));
+    }
+  }
+
+  async function sendSelectedFile() {
+    const peer = peers.find((candidate) => candidate.device_id === selectedPeerId);
+    if (!peer) {
+      setStatus("Select a peer before sending");
+      return;
+    }
+    if (!sendFilePath.trim()) {
+      setStatus("Choose a local file path before sending");
+      return;
+    }
+
+    setStatus("Sending file...");
+    try {
+      await invoke("send_file_to_peer", {
+        peerIp: peer.ip,
+        filePath: sendFilePath.trim(),
+      });
+      setStatus("File sent");
+    } catch (error) {
+      setStatus(String(error));
+    }
+  }
+
+  const stats = useMemo(
+    () => [
+      { label: "Peers", value: peers.length.toString(), icon: Radio },
+      { label: "Transfers", value: transfers.length.toString(), icon: UploadCloud },
+      { label: "Downloads", value: downloads.length.toString(), icon: FolderDown },
+      { label: "Storage", value: "SQLite", icon: HardDrive },
+    ],
+    [downloads.length, peers.length, transfers.length],
+  );
+
+  return (
+    <main className="app-shell">
+      <aside className="sidebar">
+        <div className="brand">
+          <div className="brand-mark">F</div>
+          <div>
+            <strong>FlowHub</strong>
+            <span>v0.1 MVP</span>
+          </div>
+        </div>
+
+        <nav className="nav-list" aria-label="Primary">
+          {navItems.map((item) => {
+            const Icon = item.icon;
+            return (
+              <button
+                key={item.id}
+                className={activeView === item.id ? "nav-item active" : "nav-item"}
+                onClick={() => setActiveView(item.id)}
+                type="button"
+              >
+                <Icon size={18} />
+                <span>{item.label}</span>
+              </button>
+            );
+          })}
+        </nav>
+
+        <div className="sidebar-status">
+          <Activity size={16} />
+          <span>{status}</span>
+        </div>
+      </aside>
+
+      <section className="content">
+        {activeView === "dashboard" && (
+          <Dashboard
+            stats={stats}
+            downloads={downloads}
+            peers={peers}
+            onPauseDownload={pauseDownload}
+            onRemoveDownload={removeDownload}
+            onResumeDownload={resumeDownload}
+          />
+        )}
+        {activeView === "send" && (
+          <SendView
+            dragActive={dragActive}
+            filePath={sendFilePath}
+            peers={peers}
+            selectedPeerId={selectedPeerId}
+            transfers={transfers}
+            onDragActive={setDragActive}
+            onFilePath={setSendFilePath}
+            onSelectedPeerId={setSelectedPeerId}
+            onSendFile={sendSelectedFile}
+            onStatus={setStatus}
+          />
+        )}
+        {activeView === "download" && (
+          <DownloadView
+            downloadUrl={downloadUrl}
+            downloads={downloads}
+            onAddDownload={addDownload}
+            onDownloadUrl={setDownloadUrl}
+            onPauseDownload={pauseDownload}
+            onRemoveDownload={removeDownload}
+            onResumeDownload={resumeDownload}
+          />
+        )}
+        {activeView === "settings" && <SettingsView />}
+      </section>
+    </main>
+  );
+}
+
+function Dashboard({
+  stats,
+  peers,
+  downloads,
+  onPauseDownload,
+  onRemoveDownload,
+  onResumeDownload,
+}: {
+  stats: Array<{ label: string; value: string; icon: React.ElementType }>;
+  peers: Peer[];
+  downloads: DownloadTask[];
+  onPauseDownload: (gid: string) => void;
+  onRemoveDownload: (gid: string) => void;
+  onResumeDownload: (gid: string) => void;
+}) {
+  return (
+    <div className="view">
+      <header className="view-header">
+        <h1>Dashboard</h1>
+        <p>Local discovery, file sending, aria2 downloads, and metadata storage in one workspace.</p>
+      </header>
+      <div className="stat-grid">
+        {stats.map((stat) => {
+          const Icon = stat.icon;
+          return (
+            <article className="stat-card" key={stat.label}>
+              <Icon size={20} />
+              <span>{stat.label}</span>
+              <strong>{stat.value}</strong>
+            </article>
+          );
+        })}
+      </div>
+      <div className="two-column">
+        <Panel title="Nearby Devices">
+          <PeerList peers={peers} />
+        </Panel>
+        <Panel title="Download Queue">
+          <DownloadList
+            downloads={downloads}
+            onPauseDownload={onPauseDownload}
+            onRemoveDownload={onRemoveDownload}
+            onResumeDownload={onResumeDownload}
+          />
+        </Panel>
+      </div>
+    </div>
+  );
+}
+
+function SendView({
+  dragActive,
+  filePath,
+  peers,
+  selectedPeerId,
+  transfers,
+  onDragActive,
+  onFilePath,
+  onSelectedPeerId,
+  onSendFile,
+  onStatus,
+}: {
+  dragActive: boolean;
+  filePath: string;
+  peers: Peer[];
+  selectedPeerId: string | null;
+  transfers: TransferTask[];
+  onDragActive: (active: boolean) => void;
+  onFilePath: (path: string) => void;
+  onSelectedPeerId: (id: string) => void;
+  onSendFile: () => void;
+  onStatus: (status: string) => void;
+}) {
+  return (
+    <div className="view">
+      <header className="view-header">
+        <h1>Send</h1>
+        <p>Discover LAN devices and prepare peer-to-peer file transfers.</p>
+      </header>
+      <div className="two-column wide-left">
+        <section
+          className={dragActive ? "drop-zone active" : "drop-zone"}
+          onDragEnter={(event) => {
+            event.preventDefault();
+            onDragActive(true);
+          }}
+          onDragOver={(event) => event.preventDefault()}
+          onDragLeave={() => onDragActive(false)}
+          onDrop={(event) => {
+            event.preventDefault();
+            onDragActive(false);
+            const paths = Array.from(event.dataTransfer.files)
+              .map((file) => extractDroppedPath(file))
+              .filter((path): path is string => Boolean(path));
+            if (paths.length > 0) {
+              onFilePath(paths[0]);
+              onStatus(`${paths.length} file path(s) ready for send`);
+            } else {
+              onStatus("Drop did not expose a file path; paste the path below");
+            }
+          }}
+        >
+          <UploadCloud size={42} />
+          <strong>Drop files here</strong>
+          <span>Select a peer, then drop or paste a local file path.</span>
+        </section>
+        <Panel title="Discovered Devices">
+          <PeerList peers={peers} selectedPeerId={selectedPeerId} onSelectPeer={onSelectedPeerId} />
+        </Panel>
+      </div>
+      <div className="send-bar">
+        <input
+          value={filePath}
+          onChange={(event) => onFilePath(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              void onSendFile();
+            }
+          }}
+          placeholder="/Users/you/Downloads/file.zip"
+        />
+        <button className="primary-button" onClick={onSendFile} type="button">
+          <FileUp size={18} />
+          <span>Send</span>
+        </button>
+      </div>
+      <Panel title="Transfer Progress">
+        <TransferList transfers={transfers} />
+      </Panel>
+    </div>
+  );
+}
+
+function DownloadView({
+  downloadUrl,
+  downloads,
+  onAddDownload,
+  onDownloadUrl,
+  onPauseDownload,
+  onRemoveDownload,
+  onResumeDownload,
+}: {
+  downloadUrl: string;
+  downloads: DownloadTask[];
+  onAddDownload: () => void;
+  onDownloadUrl: (url: string) => void;
+  onPauseDownload: (gid: string) => void;
+  onRemoveDownload: (gid: string) => void;
+  onResumeDownload: (gid: string) => void;
+}) {
+  return (
+    <div className="view">
+      <header className="view-header">
+        <h1>Download</h1>
+        <p>Add HTTP, HTTPS, FTP, and Magnet tasks through aria2 RPC.</p>
+      </header>
+      <div className="download-bar">
+        <input
+          value={downloadUrl}
+          onChange={(event) => onDownloadUrl(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              void onAddDownload();
+            }
+          }}
+          placeholder="https://example.com/file.iso or magnet:?xt=..."
+        />
+        <button className="primary-button" onClick={onAddDownload} type="button">
+          <Plus size={18} />
+          <span>Add</span>
+        </button>
+      </div>
+      <Panel title="Tasks">
+        <DownloadList
+          downloads={downloads}
+          onPauseDownload={onPauseDownload}
+          onRemoveDownload={onRemoveDownload}
+          onResumeDownload={onResumeDownload}
+        />
+      </Panel>
+    </div>
+  );
+}
+
+function SettingsView() {
+  return (
+    <div className="view">
+      <header className="view-header">
+        <h1>Settings</h1>
+        <p>Configure discovery, transfer, download, and storage defaults.</p>
+      </header>
+      <div className="settings-grid">
+        <label>
+          Discovery port
+          <input value="47321" readOnly />
+        </label>
+        <label>
+          aria2 RPC endpoint
+          <input value="http://127.0.0.1:6800/jsonrpc" readOnly />
+        </label>
+        <label>
+          Database
+          <input value="flowhub.db" readOnly />
+        </label>
+      </div>
+    </div>
+  );
+}
+
+function Panel({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <section className="panel">
+      <div className="panel-title">{title}</div>
+      {children}
+    </section>
+  );
+}
+
+function PeerList({
+  peers,
+  selectedPeerId,
+  onSelectPeer,
+}: {
+  peers: Peer[];
+  selectedPeerId?: string | null;
+  onSelectPeer?: (id: string) => void;
+}) {
+  if (peers.length === 0) {
+    return <div className="empty-row">No LAN peers discovered yet.</div>;
+  }
+
+  return (
+    <div className="list">
+      {peers.map((peer) => (
+        <button
+          className={selectedPeerId === peer.device_id ? "list-row peer-row selected" : "list-row peer-row"}
+          disabled={!onSelectPeer}
+          key={peer.device_id}
+          onClick={() => onSelectPeer?.(peer.device_id)}
+          type="button"
+        >
+          <div>
+            <strong>{peer.hostname}</strong>
+            <span>{peer.ip}</span>
+          </div>
+          <small>{peer.version}</small>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function TransferList({ transfers }: { transfers: TransferTask[] }) {
+  if (transfers.length === 0) {
+    return <div className="empty-row">No active transfers yet.</div>;
+  }
+
+  return (
+    <div className="list">
+      {transfers.map((transfer) => {
+        const progress =
+          transfer.total_bytes > 0
+            ? Math.min((transfer.bytes_transferred / transfer.total_bytes) * 100, 100)
+            : 0;
+        return (
+          <div className="download-row" key={transfer.id}>
+            <div className="download-main">
+              <strong>{transfer.file_path}</strong>
+              <span>
+                {transfer.peer_ip} · {formatBytes(transfer.bytes_transferred)}
+                {transfer.total_bytes > 0 ? ` / ${formatBytes(transfer.total_bytes)}` : ""} ·{" "}
+                {formatBytes(transfer.bytes_per_second)}/s · ETA {formatEta(transfer.eta_seconds)}
+              </span>
+              {transfer.error && <span className="error-text">{transfer.error}</span>}
+              <div className="progress-track">
+                <div className="progress-fill" style={{ width: `${progress}%` }} />
+              </div>
+            </div>
+            <span className={`status-pill ${transfer.status}`}>{transfer.status}</span>
+            {transfer.status === "completed" || transfer.status === "received" ? (
+              <CheckCircle2 className="success-icon" size={20} />
+            ) : null}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function DownloadList({
+  downloads,
+  onPauseDownload,
+  onRemoveDownload,
+  onResumeDownload,
+}: {
+  downloads: DownloadTask[];
+  onPauseDownload: (gid: string) => void;
+  onRemoveDownload: (gid: string) => void;
+  onResumeDownload: (gid: string) => void;
+}) {
+  if (downloads.length === 0) {
+    return <div className="empty-row">No download tasks yet.</div>;
+  }
+
+  return (
+    <div className="list">
+      {downloads.map((task) => (
+        <div className="download-row" key={task.id}>
+          <div className="download-main">
+            <strong>{task.target}</strong>
+            <span>
+              {formatBytes(task.completed_bytes)}
+              {task.total_bytes > 0 ? ` / ${formatBytes(task.total_bytes)}` : ""} ·{" "}
+              {formatBytes(task.download_speed)}/s · ETA {formatEta(task.eta_seconds)}
+            </span>
+            <div className="progress-track">
+              <div className="progress-fill" style={{ width: `${Math.min(task.progress, 100)}%` }} />
+            </div>
+          </div>
+          <span className={`status-pill ${task.status}`}>{task.status}</span>
+          <div className="icon-actions">
+            {task.status === "paused" ? (
+              <button aria-label="Resume download" onClick={() => onResumeDownload(task.id)} type="button">
+                <Play size={16} />
+              </button>
+            ) : (
+              <button aria-label="Pause download" onClick={() => onPauseDownload(task.id)} type="button">
+                <Pause size={16} />
+              </button>
+            )}
+            <button aria-label="Remove download" onClick={() => onRemoveDownload(task.id)} type="button">
+              <Trash2 size={16} />
+            </button>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function formatBytes(bytes: number) {
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    return "0 B";
+  }
+
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+
+  return `${value >= 10 || unit === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unit]}`;
+}
+
+function formatEta(seconds: number | null) {
+  if (seconds === null || !Number.isFinite(seconds)) {
+    return "--";
+  }
+
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const remainingSeconds = Math.floor(seconds % 60);
+  if (hours > 0) {
+    return `${hours}h ${minutes}m`;
+  }
+  if (minutes > 0) {
+    return `${minutes}m ${remainingSeconds}s`;
+  }
+  return `${remainingSeconds}s`;
+}
+
+function extractDroppedPath(file: File) {
+  const tauriFile = file as File & { path?: string };
+  return tauriFile.path || file.webkitRelativePath || "";
+}
+
+function upsertTransfer(current: TransferTask[], next: TransferTask) {
+  const index = current.findIndex((transfer) => transfer.id === next.id);
+  if (index === -1) {
+    return [next, ...current];
+  }
+
+  return current.map((transfer, currentIndex) => (currentIndex === index ? next : transfer));
+}
+
+createRoot(document.getElementById("root") as HTMLElement).render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>,
+);

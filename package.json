@@ -1,0 +1,14 @@
+{
+  "name": "flowhub",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": ["app"],
+  "scripts": {
+    "dev": "npm --workspace app run dev",
+    "tauri:dev": "npm --workspace app run tauri:dev",
+    "build": "npm --workspace app run build",
+    "tauri:build": "npm --workspace app run tauri:build",
+    "test:rust": "cargo test --workspace"
+  }
+}

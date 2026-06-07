@@ -1,0 +1,236 @@
+use flowhub_core::FlowHub;
+use flowhub_discovery::PeerInfo;
+use flowhub_send::{receive_file, send_file_with_progress, TransferControl};
+use serde::Serialize;
+use std::sync::Arc;
+use tauri::{AppHandle, Emitter, State};
+use tokio::sync::Mutex;
+
+const TRANSFER_PORT: u16 = 47322;
+
+struct AppState {
+    app: Arc<Mutex<FlowHub>>,
+}
+
+#[derive(Clone, Serialize)]
+struct TransferEvent {
+    id: String,
+    peer_ip: String,
+    file_path: String,
+    status: String,
+    bytes_transferred: u64,
+    total_bytes: u64,
+    bytes_per_second: u64,
+    eta_seconds: Option<u64>,
+    error: Option<String>,
+}
+
+#[tauri::command]
+async fn list_peers(state: State<'_, AppState>) -> Result<Vec<PeerInfo>, String> {
+    let app = state.app.lock().await;
+    Ok(app.list_peers())
+}
+
+#[tauri::command]
+async fn download_tasks(
+    state: State<'_, AppState>,
+) -> Result<Vec<flowhub_core::DownloadTaskView>, String> {
+    let app = state.app.lock().await;
+    app.download_tasks()
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn add_download(state: State<'_, AppState>, url: String) -> Result<String, String> {
+    let app = state.app.lock().await;
+    app.add_download(&url)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn pause_download(state: State<'_, AppState>, gid: String) -> Result<(), String> {
+    let app = state.app.lock().await;
+    app.pause_download(&gid)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn resume_download(state: State<'_, AppState>, gid: String) -> Result<(), String> {
+    let app = state.app.lock().await;
+    app.resume_download(&gid)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn remove_download(state: State<'_, AppState>, gid: String) -> Result<(), String> {
+    let app = state.app.lock().await;
+    app.remove_download(&gid)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn send_file_to_peer(
+    app_handle: AppHandle,
+    peer_ip: String,
+    file_path: String,
+) -> Result<(), String> {
+    let transfer_id = format!("{peer_ip}:{file_path}");
+    let target_addr = transfer_addr(&peer_ip);
+    let control = TransferControl::default();
+    let event_base = TransferEvent {
+        id: transfer_id.clone(),
+        peer_ip: peer_ip.clone(),
+        file_path: file_path.clone(),
+        status: "sending".into(),
+        bytes_transferred: 0,
+        total_bytes: 0,
+        bytes_per_second: 0,
+        eta_seconds: None,
+        error: None,
+    };
+    app_handle
+        .emit("transfer-progress", event_base.clone())
+        .map_err(|error| error.to_string())?;
+
+    let progress_handle = app_handle.clone();
+    let progress_base = event_base.clone();
+    let result = send_file_with_progress(&target_addr, &file_path, 0, control, move |progress| {
+        let _ = progress_handle.emit(
+            "transfer-progress",
+            TransferEvent {
+                status: "sending".into(),
+                bytes_transferred: progress.bytes_transferred,
+                total_bytes: progress.total_bytes,
+                bytes_per_second: progress.bytes_per_second,
+                eta_seconds: progress.eta_seconds,
+                ..progress_base.clone()
+            },
+        );
+    })
+    .await;
+
+    match result {
+        Ok(progress) => {
+            app_handle
+                .emit(
+                    "transfer-progress",
+                    TransferEvent {
+                        status: "completed".into(),
+                        bytes_transferred: progress.bytes_transferred,
+                        total_bytes: progress.total_bytes,
+                        bytes_per_second: progress.bytes_per_second,
+                        eta_seconds: Some(0),
+                        ..event_base
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+            Ok(())
+        }
+        Err(error) => {
+            let message = error.to_string();
+            app_handle
+                .emit(
+                    "transfer-progress",
+                    TransferEvent {
+                        status: "error".into(),
+                        error: Some(message.clone()),
+                        ..event_base
+                    },
+                )
+                .map_err(|emit_error| emit_error.to_string())?;
+            Err(message)
+        }
+    }
+}
+
+fn main() {
+    let app = FlowHub::new_default().expect("failed to initialize FlowHub");
+    let discovery = app.discovery_service();
+
+    tauri::Builder::default()
+        .manage(AppState {
+            app: Arc::new(Mutex::new(app)),
+        })
+        .setup(move |_| {
+            tauri::async_runtime::spawn(async move {
+                if let Err(error) = discovery.run().await {
+                    eprintln!("discovery service stopped: {error}");
+                }
+            });
+
+            let app_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                receive_loop(app_handle).await;
+            });
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            list_peers,
+            download_tasks,
+            add_download,
+            pause_download,
+            resume_download,
+            remove_download,
+            send_file_to_peer
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running FlowHub");
+}
+
+async fn receive_loop(app_handle: AppHandle) {
+    let output_dir = std::env::current_dir()
+        .unwrap_or_else(|_| ".".into())
+        .join("flowhub-received");
+    let bind_addr = format!("0.0.0.0:{TRANSFER_PORT}");
+
+    loop {
+        match receive_file(&bind_addr, &output_dir, TransferControl::default()).await {
+            Ok(progress) => {
+                let _ = app_handle.emit(
+                    "transfer-received",
+                    TransferEvent {
+                        id: format!("received:{}", progress.sha256.clone().unwrap_or_default()),
+                        peer_ip: "incoming".into(),
+                        file_path: output_dir.to_string_lossy().to_string(),
+                        status: "received".into(),
+                        bytes_transferred: progress.bytes_transferred,
+                        total_bytes: progress.total_bytes,
+                        bytes_per_second: progress.bytes_per_second,
+                        eta_seconds: progress.eta_seconds,
+                        error: None,
+                    },
+                );
+            }
+            Err(error) => {
+                let _ = app_handle.emit(
+                    "transfer-received",
+                    TransferEvent {
+                        id: "receiver".into(),
+                        peer_ip: "incoming".into(),
+                        file_path: output_dir.to_string_lossy().to_string(),
+                        status: "error".into(),
+                        bytes_transferred: 0,
+                        total_bytes: 0,
+                        bytes_per_second: 0,
+                        eta_seconds: None,
+                        error: Some(error.to_string()),
+                    },
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+        }
+    }
+}
+
+fn transfer_addr(peer_ip: &str) -> String {
+    if peer_ip.contains(':') && !peer_ip.starts_with('[') {
+        format!("[{peer_ip}]:{TRANSFER_PORT}")
+    } else {
+        format!("{peer_ip}:{TRANSFER_PORT}")
+    }
+}

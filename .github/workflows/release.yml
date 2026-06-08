@@ -12,40 +12,35 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: macos-latest   # Apple Silicon + Intel 通用包
+          - platform: macos-latest
             args: "--target universal-apple-darwin"
-          - platform: ubuntu-22.04   # Linux AppImage + deb
+          - platform: ubuntu-22.04
             args: ""
-          - platform: windows-latest # Windows MSI + NSIS installer
+          - platform: windows-latest
             args: ""
 
     runs-on: ${{ matrix.platform }}
 
     steps:
-      # ── 1. 拉代码 ──────────────────────────────────────────────
       - uses: actions/checkout@v4
 
-      # ── 2. Node.js ─────────────────────────────────────────────
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: "npm"
 
-      # ── 3. Rust ────────────────────────────────────────────────
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          # macOS 需要两个 target 才能出通用包
           targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
-      - name: Cache Rust dependencies
+      - name: Cache Rust
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: ". -> target"
 
-      # ── 4. Linux 系统依赖 ───────────────────────────────────────
-      - name: Install Linux dependencies
+      - name: Install Linux system dependencies
         if: matrix.platform == 'ubuntu-22.04'
         run: |
           sudo apt-get update
@@ -57,11 +52,9 @@ jobs:
             libssl-dev \
             pkg-config
 
-      # ── 5. 安装前端依赖 ─────────────────────────────────────────
       - name: Install frontend dependencies
         run: npm install
 
-      # ── 6. 构建 & 打包 & 发布 ──────────────────────────────────
       - name: Build and release
         uses: tauri-apps/tauri-action@v0
         env:
@@ -72,19 +65,16 @@ jobs:
           releaseBody: |
             ## FlowHub ${{ github.ref_name }}
 
-            ### 下载
+            | 平台 | 下载文件 |
+            |------|---------|
+            | macOS (Apple Silicon + Intel) | `FlowHub_*.dmg` |
+            | Windows | `FlowHub_*_x64-setup.exe` |
+            | Linux | `flow-hub_*_amd64.AppImage` / `.deb` |
 
-            | 平台 | 文件 |
-            |------|------|
-            | macOS (通用) | `FlowHub_*.dmg` |
-            | Windows | `FlowHub_*_x64-setup.exe` 或 `FlowHub_*_x64_en-US.msi` |
-            | Linux | `flow-hub_*_amd64.AppImage` 或 `flow-hub_*_amd64.deb` |
-
-            ### 说明
-            - macOS：下载 `.dmg`，拖入 Applications 即可
-            - Windows：运行 `.exe` 安装程序
-            - Linux：`.AppImage` 无需安装，直接运行；`.deb` 适合 Debian/Ubuntu
+            **macOS**：下载 `.dmg`，拖入 Applications 即可
+            **Windows**：运行 `.exe` 安装程序
+            **Linux**：`.AppImage` 直接运行，`.deb` 适合 Debian/Ubuntu
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
-          projectPath: "./app"
+          projectPath: "app"

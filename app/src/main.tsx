@@ -30,6 +30,7 @@ type Peer = {
   hostname: string;
   ip: string;
   version: string;
+  last_seen_secs: number;
 };
 
 type DownloadTask = {
@@ -74,8 +75,9 @@ function App() {
   const [downloadUrl, setDownloadUrl] = useState("");
   const [dragActive, setDragActive] = useState(false);
   const [selectedPeerId, setSelectedPeerId] = useState<string | null>(null);
-  const [sendFilePath, setSendFilePath] = useState("");
+  const [sendFilePaths, setSendFilePaths] = useState<string[]>([]);
   const [transfers, setTransfers] = useState<TransferTask[]>([]);
+  const [aria2Online, setAria2Online] = useState(false);
   const [pausedTransferIds, setPausedTransferIds] = useState<Set<string>>(new Set());
   const [status, setStatus] = useState("Ready");
   const [settings, setSettings] = useState<AppSettings>({
@@ -111,13 +113,15 @@ function App() {
 
   async function refreshData() {
     try {
-      const [peerResult, taskResult, historyResult] = await Promise.all([
+      const [peerResult, taskResult, historyResult, aria2Result] = await Promise.all([
         invoke<Peer[]>("list_peers"),
         invoke<DownloadTask[]>("download_tasks"),
         invoke<Array<{ id: string; status: string; target: string }>>("list_transfer_history"),
+        invoke<boolean>("check_aria2_status").catch(() => false),
       ]);
       setPeers(peerResult);
       setDownloads(taskResult);
+      setAria2Online(aria2Result);
       // Seed transfers from persisted history (real-time events will override active entries)
       setTransfers((current) => {
         let merged = [...current];
@@ -197,11 +201,25 @@ function App() {
 
   async function browseForFile() {
     try {
-      const selection = await openFileDialog({ multiple: false, directory: false });
-      if (typeof selection === "string") {
-        setSendFilePath(selection);
+      const selection = await openFileDialog({ multiple: true, directory: false });
+      if (Array.isArray(selection) && selection.length > 0) {
+        setSendFilePaths(selection);
+        setStatus(`${selection.length} file(s) selected`);
+      } else if (typeof selection === "string") {
+        setSendFilePaths([selection]);
         setStatus("File selected");
       }
+    } catch (error) {
+      setStatus(String(error));
+    }
+  }
+
+  async function launchAria2() {
+    setStatus("Starting aria2...");
+    try {
+      const ok = await invoke<boolean>("launch_aria2");
+      setAria2Online(ok);
+      setStatus(ok ? "aria2 started" : "aria2 failed to start — is it installed?");
     } catch (error) {
       setStatus(String(error));
     }
@@ -213,18 +231,18 @@ function App() {
       setStatus("Select a peer before sending");
       return;
     }
-    if (!sendFilePath.trim()) {
-      setStatus("Choose a local file path before sending");
+    if (sendFilePaths.length === 0) {
+      setStatus("Choose at least one file before sending");
       return;
     }
 
-    setStatus("Sending file...");
+    setStatus(`Sending ${sendFilePaths.length} file(s)...`);
     try {
       await invoke("send_file_to_peer", {
         peerIp: peer.ip,
-        filePath: sendFilePath.trim(),
+        filePaths: sendFilePaths,
       });
-      setStatus("File sent");
+      setSendFilePaths([]);
     } catch (error) {
       setStatus(String(error));
     }
@@ -319,21 +337,23 @@ function App() {
             stats={stats}
             downloads={downloads}
             peers={peers}
+            aria2Online={aria2Online}
             onPauseDownload={pauseDownload}
             onRemoveDownload={removeDownload}
             onResumeDownload={resumeDownload}
+            onLaunchAria2={launchAria2}
           />
         )}
         {activeView === "send" && (
           <SendView
             dragActive={dragActive}
-            filePath={sendFilePath}
+            filePaths={sendFilePaths}
             peers={peers}
             selectedPeerId={selectedPeerId}
             transfers={transfers}
             onBrowseFile={browseForFile}
             onDragActive={setDragActive}
-            onFilePath={setSendFilePath}
+            onFilePaths={setSendFilePaths}
             pausedTransferIds={pausedTransferIds}
             onPauseTransfer={pauseTransfer}
             onResumeTransfer={resumeTransfer}
@@ -377,16 +397,20 @@ function Dashboard({
   stats,
   peers,
   downloads,
+  aria2Online,
   onPauseDownload,
   onRemoveDownload,
   onResumeDownload,
+  onLaunchAria2,
 }: {
   stats: Array<{ label: string; value: string; icon: React.ElementType }>;
   peers: Peer[];
   downloads: DownloadTask[];
+  aria2Online: boolean;
   onPauseDownload: (gid: string) => void;
   onRemoveDownload: (gid: string) => void;
   onResumeDownload: (gid: string) => void;
+  onLaunchAria2: () => void;
 }) {
   return (
     <div className="view">
@@ -405,6 +429,16 @@ function Dashboard({
             </article>
           );
         })}
+      </div>
+      <div className="aria2-bar">
+        <span className={aria2Online ? "dot dot-online" : "dot dot-offline"} />
+        <span>aria2 {aria2Online ? "已连接" : "未连接"}</span>
+        {!aria2Online && (
+          <button className="secondary-button" onClick={onLaunchAria2} type="button">
+            <Play size={14} />
+            <span>启动 aria2</span>
+          </button>
+        )}
       </div>
       <div className="two-column">
         <Panel title="Nearby Devices">
@@ -425,13 +459,13 @@ function Dashboard({
 
 function SendView({
   dragActive,
-  filePath,
+  filePaths,
   peers,
   selectedPeerId,
   transfers,
   onBrowseFile,
   onDragActive,
-  onFilePath,
+  onFilePaths,
   pausedTransferIds,
   onPauseTransfer,
   onResumeTransfer,
@@ -441,14 +475,14 @@ function SendView({
   onStatus,
 }: {
   dragActive: boolean;
-  filePath: string;
+  filePaths: string[];
   peers: Peer[];
   selectedPeerId: string | null;
   transfers: TransferTask[];
   pausedTransferIds: Set<string>;
   onBrowseFile: () => void;
   onDragActive: (active: boolean) => void;
-  onFilePath: (path: string) => void;
+  onFilePaths: (paths: string[]) => void;
   onPauseTransfer: (transferId: string) => void;
   onResumeTransfer: (transferId: string) => void;
   onRetryTransfer: (transferId: string) => void;
@@ -478,39 +512,53 @@ function SendView({
               .map((file) => extractDroppedPath(file))
               .filter((path): path is string => Boolean(path));
             if (paths.length > 0) {
-              onFilePath(paths[0]);
-              onStatus(`${paths.length} file path(s) ready for send`);
+              onFilePaths(paths);
+              onStatus(`${paths.length} 个文件已就绪`);
             } else {
-              onStatus("Drop did not expose a file path; paste the path below");
+              onStatus("拖放未能获取文件路径，请手动输入");
             }
           }}
         >
           <UploadCloud size={42} />
           <strong>Drop files here</strong>
-          <span>Select a peer, then drop or paste a local file path.</span>
+          <span>支持多文件拖放，或点击 Browse 选择文件。</span>
         </section>
         <Panel title="Discovered Devices">
           <PeerList peers={peers} selectedPeerId={selectedPeerId} onSelectPeer={onSelectedPeerId} />
         </Panel>
       </div>
+
+      {/* 已选文件列表 */}
+      {filePaths.length > 0 && (
+        <div className="file-list-bar">
+          {filePaths.map((p) => (
+            <div className="file-chip" key={p}>
+              <span title={p}>{p.split("/").pop()}</span>
+              <button
+                aria-label="Remove file"
+                onClick={() => onFilePaths(filePaths.filter((x) => x !== p))}
+                type="button"
+              >
+                ×
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
       <div className="send-bar">
-        <input
-          value={filePath}
-          onChange={(event) => onFilePath(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter") {
-              void onSendFile();
-            }
-          }}
-          placeholder="/Users/you/Downloads/file.zip"
-        />
         <button className="secondary-button" onClick={onBrowseFile} type="button">
           <FolderDown size={18} />
           <span>Browse…</span>
         </button>
-        <button className="primary-button" onClick={onSendFile} type="button">
+        <button
+          className="primary-button"
+          onClick={onSendFile}
+          disabled={filePaths.length === 0}
+          type="button"
+        >
           <FileUp size={18} />
-          <span>Send</span>
+          <span>{filePaths.length > 1 ? `Send ${filePaths.length} files` : "Send"}</span>
         </button>
       </div>
       <Panel title="Transfer Progress">
@@ -662,21 +710,25 @@ function PeerList({
 
   return (
     <div className="list">
-      {peers.map((peer) => (
-        <button
-          className={selectedPeerId === peer.device_id ? "list-row peer-row selected" : "list-row peer-row"}
-          disabled={!onSelectPeer}
-          key={peer.device_id}
-          onClick={() => onSelectPeer?.(peer.device_id)}
-          type="button"
-        >
-          <div>
-            <strong>{peer.hostname}</strong>
-            <span>{peer.ip}</span>
-          </div>
-          <small>{peer.version}</small>
-        </button>
-      ))}
+      {peers.map((peer) => {
+        const isRecent = peer.last_seen_secs <= 6;
+        return (
+          <button
+            className={selectedPeerId === peer.device_id ? "list-row peer-row selected" : "list-row peer-row"}
+            disabled={!onSelectPeer}
+            key={peer.device_id}
+            onClick={() => onSelectPeer?.(peer.device_id)}
+            type="button"
+          >
+            <span className={isRecent ? "dot dot-online" : "dot dot-offline"} title={`${peer.last_seen_secs}s ago`} />
+            <div>
+              <strong>{peer.hostname}</strong>
+              <span>{peer.ip}</span>
+            </div>
+            <small>{peer.version}</small>
+          </button>
+        );
+      })}
     </div>
   );
 }

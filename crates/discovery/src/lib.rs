@@ -17,6 +17,9 @@ pub struct PeerInfo {
     pub hostname: String,
     pub ip: IpAddr,
     pub version: String,
+    /// Seconds elapsed since this peer was last seen (0 = just now).
+    #[serde(default)]
+    pub last_seen_secs: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -94,7 +97,11 @@ impl DiscoveryService {
 
         let mut values = peers
             .values()
-            .map(|entry| entry.peer.clone())
+            .map(|entry| {
+                let mut peer = entry.peer.clone();
+                peer.last_seen_secs = now.duration_since(entry.last_seen).as_secs();
+                peer
+            })
             .collect::<Vec<_>>();
         values.sort_by(|a, b| a.hostname.cmp(&b.hostname));
         values
@@ -110,6 +117,7 @@ impl DiscoveryService {
             hostname: message.hostname,
             ip: source.ip(),
             version: message.version,
+            last_seen_secs: 0,
         };
 
         self.peers.lock().expect("peer lock poisoned").insert(

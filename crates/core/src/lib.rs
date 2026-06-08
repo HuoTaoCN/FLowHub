@@ -79,6 +79,11 @@ impl FlowHub {
         self.discovery.clone()
     }
 
+    /// Returns true if the aria2 RPC server is reachable.
+    pub async fn aria2_alive(&self) -> bool {
+        self.downloads.ping().await
+    }
+
     pub async fn add_download(&self, url: &str) -> anyhow::Result<String> {
         match self.downloads.add_url(url).await {
             Ok(gid) => {

@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
+use tokio::process::Child;
 use tokio::sync::Mutex;
 
 const TRANSFER_PORT: u16 = 47322;
@@ -23,6 +24,7 @@ type TransferRegistry = Arc<Mutex<HashMap<String, TransferHandle>>>;
 struct AppState {
     app: Arc<Mutex<FlowHub>>,
     transfers: TransferRegistry,
+    aria2_child: Arc<Mutex<Option<Child>>>,
 }
 
 #[derive(Clone, Serialize)]
@@ -144,19 +146,63 @@ async fn send_file_to_peer(
     app_handle: AppHandle,
     state: State<'_, AppState>,
     peer_ip: String,
-    file_path: String,
+    file_paths: Vec<String>,
 ) -> Result<(), String> {
-    let transfer_id = format!("{peer_ip}:{file_path}");
-    run_send_transfer(
-        app_handle,
-        state.transfers.clone(),
-        state.app.clone(),
-        transfer_id,
-        peer_ip,
-        file_path,
-        0,
-    )
-    .await
+    for file_path in file_paths {
+        let peer_ip_clone = peer_ip.clone();
+        let transfer_id = format!("{peer_ip_clone}:{file_path}");
+        let app_handle2 = app_handle.clone();
+        let transfers2 = state.transfers.clone();
+        let app2 = state.app.clone();
+        tokio::spawn(async move {
+            let _ = run_send_transfer(
+                app_handle2,
+                transfers2,
+                app2,
+                transfer_id,
+                peer_ip_clone,
+                file_path,
+                0,
+            )
+            .await;
+        });
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn check_aria2_status(state: State<'_, AppState>) -> Result<bool, String> {
+    let app = state.app.lock().await;
+    Ok(app.aria2_alive().await)
+}
+
+#[tauri::command]
+async fn launch_aria2(state: State<'_, AppState>) -> Result<bool, String> {
+    // Already running?
+    {
+        let app = state.app.lock().await;
+        if app.aria2_alive().await {
+            return Ok(true);
+        }
+    }
+
+    let child = tokio::process::Command::new("aria2c")
+        .args([
+            "--enable-rpc",
+            "--rpc-listen-all=false",
+            "--rpc-listen-port=6800",
+            "--daemon=false",
+            "--quiet=true",
+        ])
+        .spawn()
+        .map_err(|e| format!("aria2c not found: {e}"))?;
+
+    *state.aria2_child.lock().await = Some(child);
+
+    // Wait briefly for aria2 to start accepting connections
+    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+    let app = state.app.lock().await;
+    Ok(app.aria2_alive().await)
 }
 
 #[tauri::command]
@@ -334,6 +380,7 @@ fn main() {
         .manage(AppState {
             app: Arc::new(Mutex::new(app)),
             transfers: Arc::new(Mutex::new(HashMap::new())),
+            aria2_child: Arc::new(Mutex::new(None)),
         })
         .setup(move |tauri_app| {
             tauri::async_runtime::spawn(async move {
@@ -361,7 +408,9 @@ fn main() {
             retry_transfer,
             list_transfer_history,
             get_settings,
-            save_settings
+            save_settings,
+            check_aria2_status,
+            launch_aria2
         ])
         .run(tauri::generate_context!())
         .expect("error while running FlowHub");

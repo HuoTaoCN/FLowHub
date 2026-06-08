@@ -61,6 +61,11 @@ impl Aria2Client {
         Ok(())
     }
 
+    /// Returns true if the aria2 RPC server is reachable.
+    pub async fn ping(&self) -> bool {
+        self.call("aria2.getVersion", json!([])).await.is_ok()
+    }
+
     pub async fn remove(&self, gid: &str) -> anyhow::Result<()> {
         self.call("aria2.remove", self.with_secret(json!([gid])))
             .await?;

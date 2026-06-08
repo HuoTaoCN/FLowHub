@@ -288,12 +288,6 @@ input {
   gap: 10px;
 }
 
-.send-bar {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
-  gap: 10px;
-}
-
 input {
   width: 100%;
   min-height: 44px;
@@ -405,6 +399,91 @@ input:focus {
   height: 34px;
   background: #edf2ee;
   color: #26332e;
+}
+
+/* Online / offline dot */
+.dot {
+  display: inline-block;
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.dot-online {
+  background: #43b883;
+  box-shadow: 0 0 0 2px rgba(67, 184, 131, 0.25);
+}
+
+.dot-offline {
+  background: #b0bdb6;
+}
+
+/* aria2 status bar */
+.aria2-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border: 1px solid #dce4de;
+  border-radius: 8px;
+  background: #ffffff;
+  font-size: 14px;
+  color: #4a5c53;
+}
+
+.aria2-bar .secondary-button {
+  margin-left: auto;
+  min-height: 34px;
+  padding: 0 12px;
+  font-size: 13px;
+}
+
+/* Selected file chips */
+.file-list-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.file-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 260px;
+  border: 1px solid #ced8d1;
+  border-radius: 999px;
+  background: #f0fbf5;
+  color: #172026;
+  font-size: 13px;
+  padding: 4px 10px;
+}
+
+.file-chip span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-chip button {
+  flex-shrink: 0;
+  border: 0;
+  background: transparent;
+  color: #5f6f67;
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  padding: 0;
+}
+
+.file-chip button:hover {
+  color: #b23b2f;
+}
+
+/* Send bar with only 2 columns when no text input */
+.send-bar {
+  display: flex;
+  gap: 10px;
 }
 
 .settings-grid {

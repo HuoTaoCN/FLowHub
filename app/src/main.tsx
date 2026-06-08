@@ -55,6 +55,11 @@ type TransferTask = {
   error: string | null;
 };
 
+type AppSettings = {
+  aria2_endpoint: string;
+  aria2_secret: string;
+};
+
 const navItems = [
   { id: "dashboard" as const, label: "Dashboard", icon: LayoutDashboard },
   { id: "send" as const, label: "Send", icon: Send },
@@ -73,8 +78,15 @@ function App() {
   const [transfers, setTransfers] = useState<TransferTask[]>([]);
   const [pausedTransferIds, setPausedTransferIds] = useState<Set<string>>(new Set());
   const [status, setStatus] = useState("Ready");
+  const [settings, setSettings] = useState<AppSettings>({
+    aria2_endpoint: "http://127.0.0.1:6800/jsonrpc",
+    aria2_secret: "",
+  });
 
   useEffect(() => {
+    void invoke<AppSettings>("get_settings")
+      .then(setSettings)
+      .catch(() => {});
     void refreshData();
     const timer = window.setInterval(refreshData, 2500);
     return () => window.clearInterval(timer);
@@ -99,12 +111,36 @@ function App() {
 
   async function refreshData() {
     try {
-      const [peerResult, taskResult] = await Promise.all([
+      const [peerResult, taskResult, historyResult] = await Promise.all([
         invoke<Peer[]>("list_peers"),
         invoke<DownloadTask[]>("download_tasks"),
+        invoke<Array<{ id: string; status: string; target: string }>>("list_transfer_history"),
       ]);
       setPeers(peerResult);
       setDownloads(taskResult);
+      // Seed transfers from persisted history (real-time events will override active entries)
+      setTransfers((current) => {
+        let merged = [...current];
+        for (const item of historyResult) {
+          if (!merged.find((t) => t.id === item.id)) {
+            merged = [
+              {
+                id: item.id,
+                peer_ip: "",
+                file_path: item.target,
+                status: item.status,
+                bytes_transferred: item.status === "completed" ? 1 : 0,
+                total_bytes: item.status === "completed" ? 1 : 0,
+                bytes_per_second: 0,
+                eta_seconds: null,
+                error: null,
+              },
+              ...merged,
+            ];
+          }
+        }
+        return merged;
+      });
     } catch {
       setStatus("Backend commands are waiting for the Tauri runtime");
     }
@@ -318,7 +354,20 @@ function App() {
             onResumeDownload={resumeDownload}
           />
         )}
-        {activeView === "settings" && <SettingsView />}
+        {activeView === "settings" && (
+          <SettingsView
+            settings={settings}
+            onSave={async (next) => {
+              try {
+                await invoke("save_settings", { settings: next });
+                setSettings(next);
+                setStatus("Settings saved — restart to apply aria2 changes");
+              } catch (error) {
+                setStatus(String(error));
+              }
+            }}
+          />
+        )}
       </section>
     </main>
   );
@@ -528,7 +577,27 @@ function DownloadView({
   );
 }
 
-function SettingsView() {
+function SettingsView({
+  settings,
+  onSave,
+}: {
+  settings: AppSettings;
+  onSave: (next: AppSettings) => Promise<void>;
+}) {
+  const [draft, setDraft] = useState<AppSettings>(settings);
+  const [saving, setSaving] = useState(false);
+
+  // Sync if parent settings change (e.g. loaded after mount)
+  useEffect(() => {
+    setDraft(settings);
+  }, [settings]);
+
+  async function handleSave() {
+    setSaving(true);
+    await onSave(draft);
+    setSaving(false);
+  }
+
   return (
     <div className="view">
       <header className="view-header">
@@ -542,12 +611,28 @@ function SettingsView() {
         </label>
         <label>
           aria2 RPC endpoint
-          <input value="http://127.0.0.1:6800/jsonrpc" readOnly />
+          <input
+            value={draft.aria2_endpoint}
+            onChange={(e) => setDraft((d) => ({ ...d, aria2_endpoint: e.target.value }))}
+            placeholder="http://127.0.0.1:6800/jsonrpc"
+          />
+        </label>
+        <label>
+          aria2 RPC secret (optional)
+          <input
+            type="password"
+            value={draft.aria2_secret}
+            onChange={(e) => setDraft((d) => ({ ...d, aria2_secret: e.target.value }))}
+            placeholder="leave blank if not set"
+          />
         </label>
         <label>
           Database
           <input value="flowhub.db" readOnly />
         </label>
+        <button className="primary-button" onClick={handleSave} disabled={saving} type="button">
+          {saving ? "Saving…" : "Save settings"}
+        </button>
       </div>
     </div>
   );

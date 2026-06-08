@@ -1,7 +1,7 @@
 use flowhub_core::FlowHub;
 use flowhub_discovery::PeerInfo;
 use flowhub_send::{receive_file, send_file_with_progress, TransferControl};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -86,6 +86,59 @@ async fn remove_download(state: State<'_, AppState>, gid: String) -> Result<(), 
         .map_err(|error| error.to_string())
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+struct AppSettings {
+    aria2_endpoint: String,
+    aria2_secret: String,
+}
+
+#[tauri::command]
+async fn get_settings(state: State<'_, AppState>) -> Result<AppSettings, String> {
+    let app = state.app.lock().await;
+    let aria2_endpoint = app
+        .get_setting("aria2_endpoint")
+        .map_err(|e| e.to_string())?
+        .unwrap_or_else(|| "http://127.0.0.1:6800/jsonrpc".to_string());
+    let aria2_secret = app
+        .get_setting("aria2_secret")
+        .map_err(|e| e.to_string())?
+        .unwrap_or_default();
+    Ok(AppSettings { aria2_endpoint, aria2_secret })
+}
+
+#[tauri::command]
+async fn save_settings(state: State<'_, AppState>, settings: AppSettings) -> Result<(), String> {
+    let app = state.app.lock().await;
+    app.save_setting("aria2_endpoint", &settings.aria2_endpoint)
+        .map_err(|e| e.to_string())?;
+    app.save_setting("aria2_secret", &settings.aria2_secret)
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[derive(Clone, Serialize)]
+struct TransferHistoryItem {
+    id: String,
+    status: String,
+    target: String,
+}
+
+#[tauri::command]
+async fn list_transfer_history(
+    state: State<'_, AppState>,
+) -> Result<Vec<TransferHistoryItem>, String> {
+    let app = state.app.lock().await;
+    let tasks = app.list_transfer_tasks().map_err(|e| e.to_string())?;
+    Ok(tasks
+        .into_iter()
+        .map(|t| TransferHistoryItem {
+            id: t.id,
+            status: t.status,
+            target: t.target,
+        })
+        .collect())
+}
+
 #[tauri::command]
 async fn send_file_to_peer(
     app_handle: AppHandle,
@@ -94,7 +147,16 @@ async fn send_file_to_peer(
     file_path: String,
 ) -> Result<(), String> {
     let transfer_id = format!("{peer_ip}:{file_path}");
-    run_send_transfer(app_handle, state.transfers.clone(), transfer_id, peer_ip, file_path, 0).await
+    run_send_transfer(
+        app_handle,
+        state.transfers.clone(),
+        state.app.clone(),
+        transfer_id,
+        peer_ip,
+        file_path,
+        0,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -142,6 +204,7 @@ async fn retry_transfer(
     run_send_transfer(
         app_handle,
         state.transfers.clone(),
+        state.app.clone(),
         transfer_id,
         peer_ip,
         file_path,
@@ -153,6 +216,7 @@ async fn retry_transfer(
 async fn run_send_transfer(
     app_handle: AppHandle,
     transfers: TransferRegistry,
+    app: Arc<Mutex<FlowHub>>,
     transfer_id: String,
     peer_ip: String,
     file_path: String,
@@ -171,6 +235,11 @@ async fn run_send_transfer(
             bytes_transferred: bytes_transferred.clone(),
         },
     );
+
+    {
+        let flowhub = app.lock().await;
+        let _ = flowhub.upsert_transfer_task(&transfer_id, "sending", &file_path);
+    }
 
     let event_base = TransferEvent {
         id: transfer_id.clone(),
@@ -215,6 +284,10 @@ async fn run_send_transfer(
     match result {
         Ok(progress) => {
             bytes_transferred.store(progress.bytes_transferred, Ordering::SeqCst);
+            {
+                let flowhub = app.lock().await;
+                let _ = flowhub.finish_transfer_task(&transfer_id, "completed");
+            }
             app_handle
                 .emit(
                     "transfer-progress",
@@ -232,6 +305,10 @@ async fn run_send_transfer(
         }
         Err(error) => {
             let message = error.to_string();
+            {
+                let flowhub = app.lock().await;
+                let _ = flowhub.finish_transfer_task(&transfer_id, "error");
+            }
             app_handle
                 .emit(
                     "transfer-progress",
@@ -281,7 +358,10 @@ fn main() {
             send_file_to_peer,
             pause_transfer,
             resume_transfer,
-            retry_transfer
+            retry_transfer,
+            list_transfer_history,
+            get_settings,
+            save_settings
         ])
         .run(tauri::generate_context!())
         .expect("error while running FlowHub");

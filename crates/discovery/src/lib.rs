@@ -59,6 +59,21 @@ impl DiscoveryService {
         })
     }
 
+    pub fn with_device_id(device_id: String, port: u16) -> anyhow::Result<Self> {
+        let hostname = hostname::get()
+            .context("failed to read hostname")?
+            .to_string_lossy()
+            .to_string();
+        Ok(Self::with_local(
+            DiscoveryMessage {
+                device_id,
+                hostname,
+                version: FLOWHUB_VERSION.to_string(),
+            },
+            port,
+        ))
+    }
+
     pub fn with_local(local: DiscoveryMessage, port: u16) -> Self {
         Self {
             local,

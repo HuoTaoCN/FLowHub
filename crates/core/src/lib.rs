@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use uuid::Uuid;
 
+const DEFAULT_ARIA2_ENDPOINT: &str = "http://127.0.0.1:6800/jsonrpc";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DownloadTaskView {
     pub id: String,
@@ -26,10 +28,26 @@ pub struct FlowHub {
 
 impl FlowHub {
     pub fn new_default() -> anyhow::Result<Self> {
+        let storage = Storage::open("flowhub.db")?;
+
+        let device_id = match storage.get_setting("device_id")? {
+            Some(id) => id,
+            None => {
+                let id = Uuid::new_v4().to_string();
+                storage.set_setting("device_id", &id)?;
+                id
+            }
+        };
+
+        let aria2_endpoint = storage
+            .get_setting("aria2_endpoint")?
+            .unwrap_or_else(|| DEFAULT_ARIA2_ENDPOINT.to_string());
+        let aria2_secret = storage.get_setting("aria2_secret")?;
+
         Self::new(
-            DiscoveryService::new(DEFAULT_DISCOVERY_PORT)?,
-            Aria2Client::new("http://127.0.0.1:6800/jsonrpc", None),
-            Storage::open("flowhub.db")?,
+            DiscoveryService::with_device_id(device_id, DEFAULT_DISCOVERY_PORT)?,
+            Aria2Client::new(&aria2_endpoint, aria2_secret),
+            storage,
         )
     }
 
@@ -109,6 +127,38 @@ impl FlowHub {
         }
         self.storage.remove_task(gid)?;
         Ok(())
+    }
+
+    pub fn upsert_transfer_task(&self, id: &str, status: &str, target: &str) -> anyhow::Result<()> {
+        self.storage.upsert_task(&TaskMetadata {
+            id: id.to_string(),
+            kind: "send".into(),
+            status: status.to_string(),
+            target: target.to_string(),
+            progress: 0,
+        })
+    }
+
+    pub fn finish_transfer_task(&self, id: &str, status: &str) -> anyhow::Result<()> {
+        let progress = if status == "completed" { 100 } else { 0 };
+        self.storage.update_task_progress(id, status, progress)
+    }
+
+    pub fn list_transfer_tasks(&self) -> anyhow::Result<Vec<TaskMetadata>> {
+        Ok(self
+            .storage
+            .list_tasks()?
+            .into_iter()
+            .filter(|t| t.kind == "send")
+            .collect())
+    }
+
+    pub fn get_setting(&self, key: &str) -> anyhow::Result<Option<String>> {
+        self.storage.get_setting(key)
+    }
+
+    pub fn save_setting(&self, key: &str, value: &str) -> anyhow::Result<()> {
+        self.storage.set_setting(key, value)
     }
 
     pub async fn download_tasks(&self) -> anyhow::Result<Vec<DownloadTaskView>> {

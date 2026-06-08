@@ -335,14 +335,14 @@ fn main() {
             app: Arc::new(Mutex::new(app)),
             transfers: Arc::new(Mutex::new(HashMap::new())),
         })
-        .setup(move |_| {
+        .setup(move |tauri_app| {
             tauri::async_runtime::spawn(async move {
                 if let Err(error) = discovery.run().await {
                     eprintln!("discovery service stopped: {error}");
                 }
             });
 
-            let app_handle = app.handle().clone();
+            let app_handle = tauri_app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 receive_loop(app_handle).await;
             });

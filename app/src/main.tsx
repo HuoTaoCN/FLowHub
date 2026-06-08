@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import {
   Activity,
   CheckCircle2,
@@ -14,6 +15,7 @@ import {
   Play,
   Plus,
   Radio,
+  RotateCw,
   Send,
   Settings,
   Trash2,
@@ -69,6 +71,7 @@ function App() {
   const [selectedPeerId, setSelectedPeerId] = useState<string | null>(null);
   const [sendFilePath, setSendFilePath] = useState("");
   const [transfers, setTransfers] = useState<TransferTask[]>([]);
+  const [pausedTransferIds, setPausedTransferIds] = useState<Set<string>>(new Set());
   const [status, setStatus] = useState("Ready");
 
   useEffect(() => {
@@ -156,6 +159,18 @@ function App() {
     }
   }
 
+  async function browseForFile() {
+    try {
+      const selection = await openFileDialog({ multiple: false, directory: false });
+      if (typeof selection === "string") {
+        setSendFilePath(selection);
+        setStatus("File selected");
+      }
+    } catch (error) {
+      setStatus(String(error));
+    }
+  }
+
   async function sendSelectedFile() {
     const peer = peers.find((candidate) => candidate.device_id === selectedPeerId);
     if (!peer) {
@@ -174,6 +189,45 @@ function App() {
         filePath: sendFilePath.trim(),
       });
       setStatus("File sent");
+    } catch (error) {
+      setStatus(String(error));
+    }
+  }
+
+  async function pauseTransfer(transferId: string) {
+    try {
+      await invoke("pause_transfer", { transferId });
+      setPausedTransferIds((current) => new Set(current).add(transferId));
+      setStatus("Transfer paused");
+    } catch (error) {
+      setStatus(String(error));
+    }
+  }
+
+  async function resumeTransfer(transferId: string) {
+    try {
+      await invoke("resume_transfer", { transferId });
+      setPausedTransferIds((current) => {
+        const next = new Set(current);
+        next.delete(transferId);
+        return next;
+      });
+      setStatus("Transfer resumed");
+    } catch (error) {
+      setStatus(String(error));
+    }
+  }
+
+  async function retryTransfer(transferId: string) {
+    setStatus("Retrying transfer...");
+    try {
+      await invoke("retry_transfer", { transferId });
+      setPausedTransferIds((current) => {
+        const next = new Set(current);
+        next.delete(transferId);
+        return next;
+      });
+      setStatus("Transfer retried");
     } catch (error) {
       setStatus(String(error));
     }
@@ -241,8 +295,13 @@ function App() {
             peers={peers}
             selectedPeerId={selectedPeerId}
             transfers={transfers}
+            onBrowseFile={browseForFile}
             onDragActive={setDragActive}
             onFilePath={setSendFilePath}
+            pausedTransferIds={pausedTransferIds}
+            onPauseTransfer={pauseTransfer}
+            onResumeTransfer={resumeTransfer}
+            onRetryTransfer={retryTransfer}
             onSelectedPeerId={setSelectedPeerId}
             onSendFile={sendSelectedFile}
             onStatus={setStatus}
@@ -321,8 +380,13 @@ function SendView({
   peers,
   selectedPeerId,
   transfers,
+  onBrowseFile,
   onDragActive,
   onFilePath,
+  pausedTransferIds,
+  onPauseTransfer,
+  onResumeTransfer,
+  onRetryTransfer,
   onSelectedPeerId,
   onSendFile,
   onStatus,
@@ -332,8 +396,13 @@ function SendView({
   peers: Peer[];
   selectedPeerId: string | null;
   transfers: TransferTask[];
+  pausedTransferIds: Set<string>;
+  onBrowseFile: () => void;
   onDragActive: (active: boolean) => void;
   onFilePath: (path: string) => void;
+  onPauseTransfer: (transferId: string) => void;
+  onResumeTransfer: (transferId: string) => void;
+  onRetryTransfer: (transferId: string) => void;
   onSelectedPeerId: (id: string) => void;
   onSendFile: () => void;
   onStatus: (status: string) => void;
@@ -386,13 +455,23 @@ function SendView({
           }}
           placeholder="/Users/you/Downloads/file.zip"
         />
+        <button className="secondary-button" onClick={onBrowseFile} type="button">
+          <FolderDown size={18} />
+          <span>Browse…</span>
+        </button>
         <button className="primary-button" onClick={onSendFile} type="button">
           <FileUp size={18} />
           <span>Send</span>
         </button>
       </div>
       <Panel title="Transfer Progress">
-        <TransferList transfers={transfers} />
+        <TransferList
+          transfers={transfers}
+          pausedTransferIds={pausedTransferIds}
+          onPauseTransfer={onPauseTransfer}
+          onResumeTransfer={onResumeTransfer}
+          onRetryTransfer={onRetryTransfer}
+        />
       </Panel>
     </div>
   );
@@ -517,7 +596,19 @@ function PeerList({
   );
 }
 
-function TransferList({ transfers }: { transfers: TransferTask[] }) {
+function TransferList({
+  transfers,
+  pausedTransferIds,
+  onPauseTransfer,
+  onResumeTransfer,
+  onRetryTransfer,
+}: {
+  transfers: TransferTask[];
+  pausedTransferIds?: Set<string>;
+  onPauseTransfer?: (transferId: string) => void;
+  onResumeTransfer?: (transferId: string) => void;
+  onRetryTransfer?: (transferId: string) => void;
+}) {
   if (transfers.length === 0) {
     return <div className="empty-row">No active transfers yet.</div>;
   }
@@ -529,6 +620,10 @@ function TransferList({ transfers }: { transfers: TransferTask[] }) {
           transfer.total_bytes > 0
             ? Math.min((transfer.bytes_transferred / transfer.total_bytes) * 100, 100)
             : 0;
+        const isOutgoing = transfer.peer_ip !== "incoming";
+        const isPaused = pausedTransferIds?.has(transfer.id) ?? false;
+        const isActive = transfer.status === "sending";
+        const isFailed = transfer.status === "error";
         return (
           <div className="download-row" key={transfer.id}>
             <div className="download-main">
@@ -547,6 +642,37 @@ function TransferList({ transfers }: { transfers: TransferTask[] }) {
             {transfer.status === "completed" || transfer.status === "received" ? (
               <CheckCircle2 className="success-icon" size={20} />
             ) : null}
+            {isOutgoing && (isActive || isFailed) && (
+              <div className="icon-actions">
+                {isActive &&
+                  (isPaused ? (
+                    <button
+                      aria-label="Resume transfer"
+                      onClick={() => onResumeTransfer?.(transfer.id)}
+                      type="button"
+                    >
+                      <Play size={16} />
+                    </button>
+                  ) : (
+                    <button
+                      aria-label="Pause transfer"
+                      onClick={() => onPauseTransfer?.(transfer.id)}
+                      type="button"
+                    >
+                      <Pause size={16} />
+                    </button>
+                  ))}
+                {isFailed && (
+                  <button
+                    aria-label="Retry transfer"
+                    onClick={() => onRetryTransfer?.(transfer.id)}
+                    type="button"
+                  >
+                    <RotateCw size={16} />
+                  </button>
+                )}
+              </div>
+            )}
           </div>
         );
       })}

@@ -2,14 +2,27 @@ use flowhub_core::FlowHub;
 use flowhub_discovery::PeerInfo;
 use flowhub_send::{receive_file, send_file_with_progress, TransferControl};
 use serde::Serialize;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
 use tokio::sync::Mutex;
 
 const TRANSFER_PORT: u16 = 47322;
 
+#[derive(Clone)]
+struct TransferHandle {
+    control: TransferControl,
+    peer_ip: String,
+    file_path: String,
+    bytes_transferred: Arc<AtomicU64>,
+}
+
+type TransferRegistry = Arc<Mutex<HashMap<String, TransferHandle>>>;
+
 struct AppState {
     app: Arc<Mutex<FlowHub>>,
+    transfers: TransferRegistry,
 }
 
 #[derive(Clone, Serialize)]
@@ -76,18 +89,95 @@ async fn remove_download(state: State<'_, AppState>, gid: String) -> Result<(), 
 #[tauri::command]
 async fn send_file_to_peer(
     app_handle: AppHandle,
+    state: State<'_, AppState>,
     peer_ip: String,
     file_path: String,
 ) -> Result<(), String> {
     let transfer_id = format!("{peer_ip}:{file_path}");
+    run_send_transfer(app_handle, state.transfers.clone(), transfer_id, peer_ip, file_path, 0).await
+}
+
+#[tauri::command]
+async fn pause_transfer(state: State<'_, AppState>, transfer_id: String) -> Result<(), String> {
+    let transfers = state.transfers.lock().await;
+    match transfers.get(&transfer_id) {
+        Some(handle) => {
+            handle.control.pause();
+            Ok(())
+        }
+        None => Err(format!("unknown transfer {transfer_id}")),
+    }
+}
+
+#[tauri::command]
+async fn resume_transfer(state: State<'_, AppState>, transfer_id: String) -> Result<(), String> {
+    let transfers = state.transfers.lock().await;
+    match transfers.get(&transfer_id) {
+        Some(handle) => {
+            handle.control.resume();
+            Ok(())
+        }
+        None => Err(format!("unknown transfer {transfer_id}")),
+    }
+}
+
+#[tauri::command]
+async fn retry_transfer(
+    app_handle: AppHandle,
+    state: State<'_, AppState>,
+    transfer_id: String,
+) -> Result<(), String> {
+    let (peer_ip, file_path, resume_from) = {
+        let transfers = state.transfers.lock().await;
+        match transfers.get(&transfer_id) {
+            Some(handle) => (
+                handle.peer_ip.clone(),
+                handle.file_path.clone(),
+                handle.bytes_transferred.load(Ordering::SeqCst),
+            ),
+            None => return Err(format!("unknown transfer {transfer_id}")),
+        }
+    };
+
+    run_send_transfer(
+        app_handle,
+        state.transfers.clone(),
+        transfer_id,
+        peer_ip,
+        file_path,
+        resume_from,
+    )
+    .await
+}
+
+async fn run_send_transfer(
+    app_handle: AppHandle,
+    transfers: TransferRegistry,
+    transfer_id: String,
+    peer_ip: String,
+    file_path: String,
+    resume_from: u64,
+) -> Result<(), String> {
     let target_addr = transfer_addr(&peer_ip);
     let control = TransferControl::default();
+    let bytes_transferred = Arc::new(AtomicU64::new(resume_from));
+
+    transfers.lock().await.insert(
+        transfer_id.clone(),
+        TransferHandle {
+            control: control.clone(),
+            peer_ip: peer_ip.clone(),
+            file_path: file_path.clone(),
+            bytes_transferred: bytes_transferred.clone(),
+        },
+    );
+
     let event_base = TransferEvent {
         id: transfer_id.clone(),
         peer_ip: peer_ip.clone(),
         file_path: file_path.clone(),
         status: "sending".into(),
-        bytes_transferred: 0,
+        bytes_transferred: resume_from,
         total_bytes: 0,
         bytes_per_second: 0,
         eta_seconds: None,
@@ -99,23 +189,32 @@ async fn send_file_to_peer(
 
     let progress_handle = app_handle.clone();
     let progress_base = event_base.clone();
-    let result = send_file_with_progress(&target_addr, &file_path, 0, control, move |progress| {
-        let _ = progress_handle.emit(
-            "transfer-progress",
-            TransferEvent {
-                status: "sending".into(),
-                bytes_transferred: progress.bytes_transferred,
-                total_bytes: progress.total_bytes,
-                bytes_per_second: progress.bytes_per_second,
-                eta_seconds: progress.eta_seconds,
-                ..progress_base.clone()
-            },
-        );
-    })
+    let progress_bytes = bytes_transferred.clone();
+    let result = send_file_with_progress(
+        &target_addr,
+        &file_path,
+        resume_from,
+        control,
+        move |progress| {
+            progress_bytes.store(progress.bytes_transferred, Ordering::SeqCst);
+            let _ = progress_handle.emit(
+                "transfer-progress",
+                TransferEvent {
+                    status: "sending".into(),
+                    bytes_transferred: progress.bytes_transferred,
+                    total_bytes: progress.total_bytes,
+                    bytes_per_second: progress.bytes_per_second,
+                    eta_seconds: progress.eta_seconds,
+                    ..progress_base.clone()
+                },
+            );
+        },
+    )
     .await;
 
     match result {
         Ok(progress) => {
+            bytes_transferred.store(progress.bytes_transferred, Ordering::SeqCst);
             app_handle
                 .emit(
                     "transfer-progress",
@@ -139,6 +238,7 @@ async fn send_file_to_peer(
                     TransferEvent {
                         status: "error".into(),
                         error: Some(message.clone()),
+                        bytes_transferred: bytes_transferred.load(Ordering::SeqCst),
                         ..event_base
                     },
                 )
@@ -153,8 +253,10 @@ fn main() {
     let discovery = app.discovery_service();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(AppState {
             app: Arc::new(Mutex::new(app)),
+            transfers: Arc::new(Mutex::new(HashMap::new())),
         })
         .setup(move |_| {
             tauri::async_runtime::spawn(async move {
@@ -176,7 +278,10 @@ fn main() {
             pause_download,
             resume_download,
             remove_download,
-            send_file_to_peer
+            send_file_to_peer,
+            pause_transfer,
+            resume_transfer,
+            retry_transfer
         ])
         .run(tauri::generate_context!())
         .expect("error while running FlowHub");

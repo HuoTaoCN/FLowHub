@@ -282,10 +282,15 @@ input {
   background: #f0fbf5;
 }
 
-.download-bar,
-.send-bar {
+.download-bar {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+}
+
+.send-bar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   gap: 10px;
 }
 
@@ -321,6 +326,25 @@ input:focus {
   background: #102025;
   color: #ffffff;
   padding: 0 18px;
+}
+
+.secondary-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 44px;
+  border: 1px solid #ced8d1;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #26332e;
+  cursor: pointer;
+  padding: 0 16px;
+}
+
+.secondary-button:hover {
+  border-color: #268565;
+  color: #166f52;
 }
 
 .download-main {
@@ -360,6 +384,15 @@ input:focus {
 .status-pill.error {
   background: #ffe8e5;
   color: #b23b2f;
+}
+
+.error-text {
+  color: #b23b2f;
+  font-size: 13px;
+}
+
+.success-icon {
+  color: #268565;
 }
 
 .icon-actions {
@@ -438,6 +471,7 @@ input:focus {
   }
 
   .download-bar,
+  .send-bar,
   .download-row {
     grid-template-columns: 1fr;
   }

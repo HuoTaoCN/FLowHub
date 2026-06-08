@@ -15,5 +15,6 @@ flowhub-send.workspace = true
 flowhub-storage.workspace = true
 serde.workspace = true
 tauri.workspace = true
+tauri-plugin-dialog.workspace = true
 tokio.workspace = true
 

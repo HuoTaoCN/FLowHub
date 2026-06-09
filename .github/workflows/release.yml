@@ -38,6 +38,23 @@ jobs:
 
     runs-on: ${{ matrix.platform }}
 
+    env:
+      RELEASE_BODY: |
+        ## FlowHub ${{ github.ref_name }}
+
+        局域网文件流转工具。下载对应平台安装包：
+
+        | 平台 | 文件 |
+        |------|------|
+        | macOS (Apple Silicon + Intel) | `FlowHub_*.dmg` |
+        | Windows | `FlowHub_*-setup.exe` 或 `.msi` |
+        | Linux | `flow-hub_*.AppImage` 或 `.deb` |
+
+        ### 安装说明（当前为未签名版本）
+        - **macOS**：下载 `.dmg` 拖入「应用程序」。首次打开若提示「已损坏/无法验证开发者」，请用「右键 → 打开」，或在终端执行 `xattr -cr /Applications/FlowHub.app` 后再打开。
+        - **Windows**：运行 `.exe`，若出现 SmartScreen 提示点「更多信息 → 仍要运行」。
+        - **Linux**：`.AppImage` 加可执行权限后直接运行；`.deb` 适用于 Debian/Ubuntu。
+
     steps:
       - uses: actions/checkout@v4
 
@@ -73,9 +90,6 @@ jobs:
       - name: Install frontend dependencies
         run: npm install
 
-      - name: Build frontend (Vite)
-        run: npm run build
-
       - name: Build Tauri app (macOS universal)
         if: matrix.platform == 'macos-latest'
         working-directory: app
@@ -90,21 +104,24 @@ jobs:
         if: matrix.platform == 'macos-latest'
         uses: softprops/action-gh-release@v2
         with:
+          body: ${{ env.RELEASE_BODY }}
           files: |
-            app/src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+            target/universal-apple-darwin/release/bundle/dmg/*.dmg
 
       - name: Upload release artifacts (Linux)
         if: matrix.platform == 'ubuntu-22.04'
         uses: softprops/action-gh-release@v2
         with:
+          body: ${{ env.RELEASE_BODY }}
           files: |
-            app/src-tauri/target/release/bundle/appimage/*.AppImage
-            app/src-tauri/target/release/bundle/deb/*.deb
+            target/release/bundle/appimage/*.AppImage
+            target/release/bundle/deb/*.deb
 
       - name: Upload release artifacts (Windows)
         if: matrix.platform == 'windows-latest'
         uses: softprops/action-gh-release@v2
         with:
+          body: ${{ env.RELEASE_BODY }}
           files: |
-            app/src-tauri/target/release/bundle/nsis/*.exe
-            app/src-tauri/target/release/bundle/msi/*.msi
+            target/release/bundle/nsis/*.exe
+            target/release/bundle/msi/*.msi
